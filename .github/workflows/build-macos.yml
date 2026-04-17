@@ -19,11 +19,12 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          brew install cmake ninja ccache llvm findutils zip
+          brew install cmake ninja ccache llvm findutils grep zip
 
-      - name: Set GNU tools in PATH (important)
+      - name: Set GNU tools in PATH (find + grep)
         run: |
           echo "$(brew --prefix findutils)/libexec/gnubin" >> $GITHUB_PATH
+          echo "$(brew --prefix grep)/libexec/gnubin" >> $GITHUB_PATH
 
       - name: Set LLVM toolchain
         run: |
