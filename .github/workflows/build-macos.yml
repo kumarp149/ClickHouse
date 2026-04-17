@@ -3,7 +3,7 @@ name: Build ClickHouse (macOS minimal + artifact)
 on:
   push:
     branches:
-      - build   # only runs on push/commit to build branch
+      - build
   workflow_dispatch:
 
 jobs:
@@ -19,19 +19,22 @@ jobs:
       - name: Install dependencies
         run: |
           brew update
-          brew install cmake ninja ccache llvm zip
+          brew install cmake ninja ccache llvm findutils zip
 
-      - name: Set LLVM toolchain (required by ClickHouse)
+      - name: Set GNU tools in PATH (important)
         run: |
-          echo "LLVM_ROOT=$(brew --prefix llvm)" >> $GITHUB_ENV
-          echo "$(brew --prefix llvm)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix findutils)/libexec/gnubin" >> $GITHUB_PATH
 
-          echo "CC=$(brew --prefix llvm)/bin/clang" >> $GITHUB_ENV
-          echo "CXX=$(brew --prefix llvm)/bin/clang++" >> $GITHUB_ENV
+      - name: Set LLVM toolchain
+        run: |
+          LLVM_ROOT=$(brew --prefix llvm)
+          echo "$LLVM_ROOT/bin" >> $GITHUB_PATH
 
+          echo "CC=$LLVM_ROOT/bin/clang" >> $GITHUB_ENV
+          echo "CXX=$LLVM_ROOT/bin/clang++" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
 
-      - name: Set SDKROOT (fix macOS linker issues)
+      - name: Set SDKROOT
         run: |
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> $GITHUB_ENV
 
@@ -43,7 +46,7 @@ jobs:
           restore-keys: |
             macos-ccache-
 
-      - name: Configure (minimal ClickHouse build)
+      - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -68,14 +71,13 @@ jobs:
         run: |
           ninja -C build clickhouse
 
-      - name: Strip binary (reduce size)
+      - name: Strip binary
         run: |
           strip build/programs/clickhouse || true
 
       - name: Prepare artifacts
         run: |
           mkdir -p artifacts
-
           cp build/programs/clickhouse artifacts/ || true
           cp build/programs/clickhouse-client artifacts/ || true
 
