@@ -1,0 +1,81 @@
+name: Build ClickHouse (macOS minimal + artifact)
+
+on:
+  push:
+    branches:
+      - build        # only runs on push/commit to 'build' branch
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install cmake ninja ccache
+
+      - name: Setup compiler (use Apple clang)
+        run: |
+          echo "CC=clang" >> $GITHUB_ENV
+          echo "CXX=clang++" >> $GITHUB_ENV
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: macos-ccache-${{ github.sha }}
+          restore-keys: |
+            macos-ccache-
+
+      - name: Configure (minimal build)
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_JEMALLOC=OFF \
+            -DENABLE_TESTS=OFF \
+            -DENABLE_UTILS=OFF \
+            -DENABLE_BENCHMARKS=OFF \
+            -DENABLE_EXAMPLES=OFF \
+            -DENABLE_FUZZING=OFF \
+            -DENABLE_PARQUET=OFF \
+            -DENABLE_ORC=OFF \
+            -DENABLE_AVRO=OFF \
+            -DENABLE_MYSQL=OFF \
+            -DENABLE_ODBC=OFF \
+            -DENABLE_HDFS=OFF \
+            -DENABLE_RUST=OFF
+
+      - name: Build ClickHouse
+        run: |
+          ninja -C build clickhouse
+
+      - name: Strip binary (reduce size)
+        run: |
+          strip build/programs/clickhouse || true
+
+      - name: Prepare artifact name
+        run: |
+          echo "ARTIFACT_NAME=clickhouse-${GITHUB_SHA}.zip" >> $GITHUB_ENV
+
+      - name: Package binaries
+        run: |
+          mkdir -p artifacts
+          cp build/programs/clickhouse artifacts/
+          cp build/programs/clickhouse-client artifacts/ || true
+
+          cd artifacts
+          zip -r -9 $ARTIFACT_NAME *
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: clickhouse-macos
+          path: artifacts/${{ env.ARTIFACT_NAME }}
