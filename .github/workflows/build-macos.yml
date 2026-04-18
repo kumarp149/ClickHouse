@@ -1,4 +1,4 @@
-name: Build ClickHouse (macOS minimal + artifact)
+name: Build ClickHouse (macOS incremental + artifact)
 
 on:
   push:
@@ -21,12 +21,14 @@ jobs:
           brew update
           brew install cmake ninja ccache llvm findutils grep zip
 
-      - name: Set GNU tools in PATH (find + grep)
+      # GNU tools (BSD → GNU replacement)
+      - name: Setup GNU tools
         run: |
           echo "$(brew --prefix findutils)/libexec/gnubin" >> $GITHUB_PATH
           echo "$(brew --prefix grep)/libexec/gnubin" >> $GITHUB_PATH
 
-      - name: Set LLVM toolchain
+      # LLVM toolchain (required by ClickHouse)
+      - name: Setup LLVM
         run: |
           LLVM_ROOT=$(brew --prefix llvm)
           echo "$LLVM_ROOT/bin" >> $GITHUB_PATH
@@ -35,57 +37,82 @@ jobs:
           echo "CXX=$LLVM_ROOT/bin/clang++" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
 
-      - name: Set SDKROOT
+      # Fix macOS SDK path (prevents linker issues)
+      - name: Setup SDK
         run: |
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> $GITHUB_ENV
 
+      # ✅ Incremental build via ccache (SAFE)
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: ~/.ccache
-          key: macos-ccache-${{ github.sha }}
+          key: macos-ccache-v1
           restore-keys: |
             macos-ccache-
 
+      - name: Setup ccache
+        run: |
+          export CCACHE_DIR=~/.ccache
+          export CCACHE_MAXSIZE=5G
+          ccache -M 5G
+          ccache -s
+
+      # ⚡ OPTIONAL (true incremental, but can break sometimes)
+      # - name: Cache build directory
+      #   uses: actions/cache@v4
+      #   with:
+      #     path: build
+      #     key: macos-build-v1
+      #     restore-keys: |
+      #       macos-build-
+
+      # Configure only if needed (helps incremental builds)
       - name: Configure
         run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=$CC \
-            -DCMAKE_CXX_COMPILER=$CXX \
-            -DCMAKE_OSX_SYSROOT=$SDKROOT \
-            -DENABLE_JEMALLOC=OFF \
-            -DENABLE_TESTS=OFF \
-            -DENABLE_UTILS=OFF \
-            -DENABLE_BENCHMARKS=OFF \
-            -DENABLE_EXAMPLES=OFF \
-            -DENABLE_FUZZING=OFF \
-            -DENABLE_PARQUET=OFF \
-            -DENABLE_ORC=OFF \
-            -DENABLE_AVRO=OFF \
-            -DENABLE_MYSQL=OFF \
-            -DENABLE_ODBC=OFF \
-            -DENABLE_HDFS=OFF \
-            -DENABLE_RUST=OFF
+          if [ ! -f build/build.ninja ]; then
+            cmake -S . -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DCMAKE_C_COMPILER=$CC \
+              -DCMAKE_CXX_COMPILER=$CXX \
+              -DCMAKE_OSX_SYSROOT=$SDKROOT \
+              -DCMAKE_EXE_LINKER_FLAGS="-liconv" \
+              -DUSE_INTERNAL_LIBICONV=OFF \
+              -DENABLE_JEMALLOC=OFF \
+              -DENABLE_TESTS=OFF \
+              -DENABLE_UTILS=OFF \
+              -DENABLE_BENCHMARKS=OFF \
+              -DENABLE_EXAMPLES=OFF \
+              -DENABLE_FUZZING=OFF \
+              -DENABLE_PARQUET=OFF \
+              -DENABLE_ORC=OFF \
+              -DENABLE_AVRO=OFF \
+              -DENABLE_MYSQL=OFF \
+              -DENABLE_ODBC=OFF \
+              -DENABLE_HDFS=OFF \
+              -DENABLE_RUST=OFF
+          fi
 
-      - name: Build ClickHouse
+      - name: Build (incremental)
         run: |
-          ninja -C build clickhouse
+          ninja -C build -j 4 clickhouse
+
+      - name: Show ccache stats
+        run: |
+          ccache -s
 
       - name: Strip binary
         run: |
           strip build/programs/clickhouse || true
 
-      - name: Prepare artifacts
+      - name: Package artifact
         run: |
           mkdir -p artifacts
           cp build/programs/clickhouse artifacts/ || true
           cp build/programs/clickhouse-client artifacts/ || true
 
-      - name: Create zip archive
-        run: |
           cd artifacts
-          zip -r clickhouse-macos-${GITHUB_SHA}.zip .
+          zip -r clickhouse-${GITHUB_SHA}.zip .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
