@@ -2,7 +2,9 @@ name: ClickHouse Incremental Build
 
 on:
   push:
-    branches: [ "build"]
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
   # Allow manual trigger from Actions tab
   workflow_dispatch:
 
@@ -89,11 +91,33 @@ jobs:
           clang++-${{ env.CLANG_VERSION }} --version
 
       # ---------------------------------------------------------------
-      # 5. INSTALL RUST (optional — disabling avoids network issues)
-      #    Comment this out if you want to skip Rust-dependent features
+      # 5. INSTALL RUST — ClickHouse requires a specific nightly version
+      #    The required version is pinned in contrib/corrosion-cmake
       # ---------------------------------------------------------------
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        run: |
+          # Install rustup first with no default toolchain
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          source "$HOME/.cargo/env"
+
+          # Read the exact nightly version ClickHouse requires directly
+          # from the submodule — so this never breaks when CH bumps the version
+          RUST_VERSION=$(grep -r "nightly-" contrib/corrosion-cmake/CMakeLists.txt \
+            | grep -oP 'nightly-[\d-]+' | head -1)
+
+          echo "ClickHouse requires Rust toolchain: $RUST_VERSION"
+
+          # Install that exact nightly version
+          rustup toolchain install $RUST_VERSION
+          rustup default $RUST_VERSION
+
+          # Verify
+          rustc --version
+          cargo --version
+
+      # Add cargo to PATH persistently for all subsequent steps
+      - name: Add cargo to PATH
+        run: echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       # ---------------------------------------------------------------
       # 6. RESTORE CCACHE — this is what makes builds incremental
@@ -145,7 +169,7 @@ jobs:
       # ---------------------------------------------------------------
       # 8. BUILD
       # Parallel jobs: conservative to avoid OOM on shared runners
-      # Increase -j if you have a beefier runner
+      # Increase --parallel if you have a beefier runner
       # ---------------------------------------------------------------
       - name: Build ClickHouse
         run: |
