@@ -1,10 +1,8 @@
-name: Build ClickHouse (macOS incremental + artifact)
+name: Build ClickHouse (macOS FIXED)
 
 on:
   push:
-    branches:
-      - build
-  workflow_dispatch:
+    branches: [build]
 
 jobs:
   build:
@@ -15,10 +13,10 @@ jobs:
         with:
           submodules: recursive
 
-      - name: Install dependencies
+      - name: Install deps
         run: |
           brew update
-          brew install cmake ninja ccache llvm findutils grep zip libiconv
+          brew install cmake ninja ccache llvm findutils grep zip libxml2
 
       - name: Setup GNU tools
         run: |
@@ -27,79 +25,52 @@ jobs:
 
       - name: Setup LLVM
         run: |
-          LLVM_ROOT=$(brew --prefix llvm)
-          echo "$LLVM_ROOT/bin" >> $GITHUB_PATH
-          echo "CC=$LLVM_ROOT/bin/clang" >> $GITHUB_ENV
-          echo "CXX=$LLVM_ROOT/bin/clang++" >> $GITHUB_ENV
-          echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
+          LLVM=$(brew --prefix llvm)
+          echo "$LLVM/bin" >> $GITHUB_PATH
+          echo "CC=$LLVM/bin/clang" >> $GITHUB_ENV
+          echo "CXX=$LLVM/bin/clang++" >> $GITHUB_ENV
 
       - name: Setup SDK
         run: |
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> $GITHUB_ENV
 
-      # ✅ FIX: Proper libiconv integration
-      - name: Setup libiconv
+      # 🔥 KEY FIX
+      - name: Setup libxml2
         run: |
-          ICONV_PREFIX=$(brew --prefix libiconv)
-          echo "CMAKE_PREFIX_PATH=$ICONV_PREFIX:$CMAKE_PREFIX_PATH" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=$ICONV_PREFIX/lib:$LIBRARY_PATH" >> $GITHUB_ENV
-          echo "CPATH=$ICONV_PREFIX/include:$CPATH" >> $GITHUB_ENV
+          XML2=$(brew --prefix libxml2)
+          echo "CMAKE_PREFIX_PATH=$XML2" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$XML2/lib" >> $GITHUB_ENV
+          echo "CPATH=$XML2/include" >> $GITHUB_ENV
 
-      - name: Cache ccache
-        uses: actions/cache@v4
-        with:
-          path: ~/.ccache
-          key: macos-ccache-v1
-          restore-keys: |
-            macos-ccache-
-
-      - name: Setup ccache
+      - name: Clean env
         run: |
-          export CCACHE_DIR=~/.ccache
-          ccache -M 5G
-          ccache -s
+          unset CFLAGS CXXFLAGS LDFLAGS
 
-      - name: Clean environment
-        run: |
-          unset CFLAGS
-          unset CXXFLAGS
-          unset LDFLAGS
+      - name: Clean build
+        run: rm -rf build
 
       - name: Configure
         run: |
-          if [ ! -f build/build.ninja ]; then
-            cmake -S . -B build -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DCMAKE_C_COMPILER=$CC \
-              -DCMAKE_CXX_COMPILER=$CXX \
-              -DCMAKE_OSX_SYSROOT=$SDKROOT \
-              -DENABLE_JEMALLOC=OFF \
-              -DENABLE_TESTS=OFF \
-              -DENABLE_UTILS=OFF \
-              -DENABLE_BENCHMARKS=OFF \
-              -DENABLE_EXAMPLES=OFF \
-              -DENABLE_FUZZING=OFF \
-              -DENABLE_PARQUET=OFF \
-              -DENABLE_ORC=OFF \
-              -DENABLE_AVRO=OFF \
-              -DENABLE_MYSQL=OFF \
-              -DENABLE_ODBC=OFF \
-              -DENABLE_HDFS=OFF \
-              -DENABLE_RUST=OFF
-          fi
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER=$CC \
+            -DCMAKE_CXX_COMPILER=$CXX \
+            -DCMAKE_OSX_SYSROOT=$SDKROOT \
+            -DUSE_INTERNAL_LIBXML2=OFF \
+            -DENABLE_JEMALLOC=OFF \
+            -DENABLE_TESTS=OFF \
+            -DENABLE_UTILS=OFF \
+            -DENABLE_BENCHMARKS=OFF \
+            -DENABLE_EXAMPLES=OFF \
+            -DENABLE_FUZZING=OFF \
+            -DENABLE_RUST=OFF
 
       - name: Build
         run: |
           ninja -C build -j 4 clickhouse
 
-      - name: Package artifact
-        run: |
-          mkdir -p artifacts
-          cp build/programs/clickhouse artifacts/
-          cd artifacts
-          zip -r clickhouse-${GITHUB_SHA}.zip .
-
-      - uses: actions/upload-artifact@v4
+      - name: Upload
+        uses: actions/upload-artifact@v4
         with:
-          name: clickhouse-macos
-          path: artifacts/*.zip
+          name: clickhouse
+          path: build/programs/clickhouse
