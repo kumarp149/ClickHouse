@@ -1,76 +1,97 @@
-name: Build ClickHouse (macOS FIXED)
+name: Build ClickHouse (Linux Stable)
 
 on:
   push:
-    branches: [build]
+    branches:
+      - build
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ubuntu-22.04
+
+    env:
+      CCACHE_DIR: ~/.ccache
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install deps
+      # ✅ Stable dependency set (don’t trim this)
+      - name: Install dependencies
         run: |
-          brew update
-          brew install cmake ninja ccache llvm findutils grep zip libxml2
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang lld \
+            cmake ninja-build ccache \
+            build-essential pkg-config \
+            git \
+            libicu-dev \
+            libreadline-dev \
+            libssl-dev \
+            zlib1g-dev \
+            libzstd-dev \
+            liblz4-dev
 
-      - name: Setup GNU tools
+      # ✅ Cache only ccache (safe)
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: linux-ccache-v1
+          restore-keys: |
+            linux-ccache-
+
+      - name: Setup ccache
         run: |
-          echo "$(brew --prefix findutils)/libexec/gnubin" >> $GITHUB_PATH
-          echo "$(brew --prefix grep)/libexec/gnubin" >> $GITHUB_PATH
+          ccache -M 5G
+          ccache -s
 
-      - name: Setup LLVM
+      # ❗ Clean environment (ClickHouse requirement)
+      - name: Clean environment
         run: |
-          LLVM=$(brew --prefix llvm)
-          echo "$LLVM/bin" >> $GITHUB_PATH
-          echo "CC=$LLVM/bin/clang" >> $GITHUB_ENV
-          echo "CXX=$LLVM/bin/clang++" >> $GITHUB_ENV
+          unset CFLAGS
+          unset CXXFLAGS
+          unset LDFLAGS
 
-      - name: Setup SDK
-        run: |
-          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> $GITHUB_ENV
-
-      # 🔥 KEY FIX
-      - name: Setup libxml2
-        run: |
-          XML2=$(brew --prefix libxml2)
-          echo "CMAKE_PREFIX_PATH=$XML2" >> $GITHUB_ENV
-          echo "LIBRARY_PATH=$XML2/lib" >> $GITHUB_ENV
-          echo "CPATH=$XML2/include" >> $GITHUB_ENV
-
-      - name: Clean env
-        run: |
-          unset CFLAGS CXXFLAGS LDFLAGS
-
-      - name: Clean build
+      # ❗ Always fresh build (avoid subtle corruption)
+      - name: Clean build directory
         run: rm -rf build
 
+      # ✅ Conservative config (don’t over-disable yet)
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=$CC \
-            -DCMAKE_CXX_COMPILER=$CXX \
-            -DCMAKE_OSX_SYSROOT=$SDKROOT \
-            -DUSE_INTERNAL_LIBXML2=OFF \
-            -DENABLE_JEMALLOC=OFF \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DENABLE_TESTS=OFF \
             -DENABLE_UTILS=OFF \
-            -DENABLE_BENCHMARKS=OFF \
-            -DENABLE_EXAMPLES=OFF \
-            -DENABLE_FUZZING=OFF \
-            -DENABLE_RUST=OFF
+            -DENABLE_BENCHMARKS=OFF
 
       - name: Build
         run: |
           ninja -C build -j 4 clickhouse
 
-      - name: Upload
+      - name: Show ccache stats
+        run: ccache -s
+
+      - name: Strip binary
+        run: |
+          strip build/programs/clickhouse || true
+
+      - name: Package artifact
+        run: |
+          mkdir -p artifacts
+          cp build/programs/clickhouse artifacts/
+          cd artifacts
+          zip -r clickhouse-linux-${GITHUB_SHA}.zip .
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: clickhouse
-          path: build/programs/clickhouse
+          name: clickhouse-linux
+          path: artifacts/*.zip
