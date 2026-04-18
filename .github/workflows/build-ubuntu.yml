@@ -1,0 +1,231 @@
+name: ClickHouse Incremental Build
+
+on:
+  push:
+    branches: [ "build"]
+  # Allow manual trigger from Actions tab
+  workflow_dispatch:
+
+# Cancel in-progress runs on the same branch to save minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ClickHouse (Ubuntu, Clang-21)
+
+    # Use a large runner — ClickHouse needs serious resources
+    # If you're on a free plan, use ubuntu-latest but expect slower builds
+    runs-on: ubuntu-latest  # Replace with ubuntu-22.04-16core if available
+
+    permissions:
+      contents: read
+      actions: write  # Required for incremental ccache to save back to cache
+
+    env:
+      CLANG_VERSION: 21
+      BUILD_DIR: ${{ github.workspace }}/build
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 5G         # ClickHouse is huge — keep this generous
+      CCACHE_COMPRESS: "true"
+      CCACHE_COMPRESSLEVEL: "6"
+      CCACHE_BASEDIR: ${{ github.workspace }}
+
+    steps:
+
+      # ---------------------------------------------------------------
+      # 1. CHECKOUT
+      # ---------------------------------------------------------------
+      - name: Checkout ClickHouse source
+        uses: actions/checkout@v4
+        with:
+          repository: ClickHouse/ClickHouse   # Change to your fork if needed
+          # ref: master                        # Uncomment to pin a branch
+          submodules: "false"                  # We init submodules manually below
+
+      # ---------------------------------------------------------------
+      # 2. SUBMODULES — shallow + selective to save disk & time
+      # ---------------------------------------------------------------
+      - name: Initialize submodules (shallow)
+        run: |
+          git submodule update --init --depth 1
+          echo "Submodule init complete"
+
+      # ---------------------------------------------------------------
+      # 3. INSTALL SYSTEM DEPENDENCIES
+      # ---------------------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential \
+            git \
+            cmake \
+            ccache \
+            ninja-build \
+            python3 \
+            nasm \
+            yasm \
+            gawk \
+            lsb-release \
+            wget \
+            software-properties-common \
+            gnupg \
+            lld \
+            libssl-dev
+
+      # ---------------------------------------------------------------
+      # 4. INSTALL CLANG-21 via LLVM's official script
+      # ---------------------------------------------------------------
+      - name: Install Clang-21
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh ${{ env.CLANG_VERSION }}
+
+          # Verify installation
+          clang-${{ env.CLANG_VERSION }} --version
+          clang++-${{ env.CLANG_VERSION }} --version
+
+      # ---------------------------------------------------------------
+      # 5. INSTALL RUST (optional — disabling avoids network issues)
+      #    Comment this out if you want to skip Rust-dependent features
+      # ---------------------------------------------------------------
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # ---------------------------------------------------------------
+      # 6. RESTORE CCACHE — this is what makes builds incremental
+      #    Key includes CMakeLists hash so cache busts on build system changes
+      # ---------------------------------------------------------------
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        id: ccache-restore
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          # Primary key — exact match (hits on re-runs of same commit)
+          key: ccache-clickhouse-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}
+          # Fallback keys — restores nearest previous cache
+          restore-keys: |
+            ccache-clickhouse-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-
+            ccache-clickhouse-${{ runner.os }}-
+
+      - name: Configure ccache
+        run: |
+          mkdir -p ${{ env.CCACHE_DIR }}
+          ccache --set-config=max_size=${{ env.CCACHE_MAXSIZE }}
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=6
+          ccache --set-config=base_dir=${{ env.CCACHE_BASEDIR }}
+          ccache --zero-stats   # Reset stats so post-build report is clean
+          ccache --show-config
+
+      # ---------------------------------------------------------------
+      # 7. CMAKE CONFIGURE
+      # ---------------------------------------------------------------
+      - name: Configure CMake
+        run: |
+          mkdir -p ${{ env.BUILD_DIR }}
+          cmake -S . -B ${{ env.BUILD_DIR }} \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DCMAKE_C_COMPILER=/usr/bin/clang-${{ env.CLANG_VERSION }} \
+            -DCMAKE_CXX_COMPILER=/usr/bin/clang++-${{ env.CLANG_VERSION }} \
+            -DCMAKE_ASM_COMPILER=/usr/bin/clang-${{ env.CLANG_VERSION }} \
+            -DCMAKE_LINKER=/usr/bin/lld-${{ env.CLANG_VERSION }} \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DENABLE_TESTS=OFF \
+            -DENABLE_BENCHMARKS=OFF \
+            -DENABLE_UTILS=OFF \
+            -DDISABLE_ALL_DEBUG_SYMBOLS=OFF
+
+      # ---------------------------------------------------------------
+      # 8. BUILD
+      # Parallel jobs: conservative to avoid OOM on shared runners
+      # Increase -j if you have a beefier runner
+      # ---------------------------------------------------------------
+      - name: Build ClickHouse
+        run: |
+          cmake --build ${{ env.BUILD_DIR }} \
+            --target clickhouse \
+            --parallel 4
+
+      # ---------------------------------------------------------------
+      # 9. CCACHE STATS — tells you how effective the cache was
+      # ---------------------------------------------------------------
+      - name: Print ccache stats
+        if: always()
+        run: ccache --show-stats
+
+      # ---------------------------------------------------------------
+      # 10. SAVE CCACHE — always save even if build fails (partial cache
+      #     is still useful for next run)
+      # ---------------------------------------------------------------
+      - name: Save ccache
+        uses: actions/cache/save@v4
+        if: always()   # Save even on failure — partial cache helps next build
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-clickhouse-${{ runner.os }}-${{ hashFiles('CMakeLists.txt', 'cmake/**') }}-${{ github.sha }}
+
+      # ---------------------------------------------------------------
+      # 11. VERIFY BINARY
+      # ---------------------------------------------------------------
+      - name: Verify binary
+        run: |
+          ${{ env.BUILD_DIR }}/programs/clickhouse --version
+
+      # ---------------------------------------------------------------
+      # 12. ZIP AND UPLOAD BINARY AS ARTIFACT
+      # ---------------------------------------------------------------
+      - name: Zip ClickHouse binary
+        run: |
+          cd ${{ env.BUILD_DIR }}/programs
+          zip clickhouse-binary-${{ github.sha }}.zip clickhouse
+          echo "Binary size: $(du -sh clickhouse-binary-${{ github.sha }}.zip)"
+
+      - name: Upload ClickHouse binary (zipped)
+        uses: actions/upload-artifact@v4
+        with:
+          name: clickhouse-binary-${{ github.sha }}
+          path: ${{ env.BUILD_DIR }}/programs/clickhouse-binary-${{ github.sha }}.zip
+          retention-days: 7
+
+      # ---------------------------------------------------------------
+      # 13. ZIP AND UPLOAD compile_commands.json
+      # ---------------------------------------------------------------
+      - name: Zip compile_commands.json
+        run: |
+          cd ${{ env.BUILD_DIR }}
+          zip compile-commands-${{ github.sha }}.zip compile_commands.json
+          echo "compile_commands size: $(du -sh compile-commands-${{ github.sha }}.zip)"
+
+      - name: Upload compile_commands.json (zipped)
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-commands-${{ github.sha }}
+          path: ${{ env.BUILD_DIR }}/compile-commands-${{ github.sha }}.zip
+          retention-days: 7
+
+      # ---------------------------------------------------------------
+      # 14. ZIP AND UPLOAD FULL BUILD ARTIFACT (binary + compile_commands)
+      # ---------------------------------------------------------------
+      - name: Zip full build artifact
+        run: |
+          cd ${{ github.workspace }}
+          zip -r build-artifacts-${{ github.sha }}.zip \
+            build/programs/clickhouse \
+            build/compile_commands.json \
+            --exclude "build/**/*.o" \
+            --exclude "build/**/*.a"
+          echo "Full artifact size: $(du -sh build-artifacts-${{ github.sha }}.zip)"
+
+      - name: Upload full build artifact (zipped)
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-full-${{ github.sha }}
+          path: build-artifacts-${{ github.sha }}.zip
+          retention-days: 3   # Shorter retention — these will be large
