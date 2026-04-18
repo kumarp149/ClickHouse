@@ -2,9 +2,7 @@ name: ClickHouse Incremental Build
 
 on:
   push:
-    branches: [ "main", "master" ]
-  pull_request:
-    branches: [ "main", "master" ]
+    branches: ["build"]
   # Allow manual trigger from Actions tab
   workflow_dispatch:
 
