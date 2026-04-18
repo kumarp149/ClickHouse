@@ -21,13 +21,13 @@ jobs:
           brew update
           brew install cmake ninja ccache llvm findutils grep zip
 
-      # GNU tools (BSD → GNU replacement)
+      # GNU tools (replace BSD tools)
       - name: Setup GNU tools
         run: |
           echo "$(brew --prefix findutils)/libexec/gnubin" >> $GITHUB_PATH
           echo "$(brew --prefix grep)/libexec/gnubin" >> $GITHUB_PATH
 
-      # LLVM toolchain (required by ClickHouse)
+      # LLVM toolchain (required)
       - name: Setup LLVM
         run: |
           LLVM_ROOT=$(brew --prefix llvm)
@@ -37,12 +37,12 @@ jobs:
           echo "CXX=$LLVM_ROOT/bin/clang++" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
 
-      # Fix macOS SDK path (prevents linker issues)
+      # macOS SDK fix
       - name: Setup SDK
         run: |
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> $GITHUB_ENV
 
-      # ✅ Incremental build via ccache (SAFE)
+      # ✅ Incremental builds (ccache)
       - name: Cache ccache
         uses: actions/cache@v4
         with:
@@ -58,7 +58,7 @@ jobs:
           ccache -M 5G
           ccache -s
 
-      # ⚡ OPTIONAL (true incremental, but can break sometimes)
+      # ⚡ OPTIONAL: true incremental builds (use later)
       # - name: Cache build directory
       #   uses: actions/cache@v4
       #   with:
@@ -67,7 +67,14 @@ jobs:
       #     restore-keys: |
       #       macos-build-
 
-      # Configure only if needed (helps incremental builds)
+      # 🔥 IMPORTANT: clean env (ClickHouse requirement)
+      - name: Clean environment
+        run: |
+          unset CFLAGS
+          unset CXXFLAGS
+          unset LDFLAGS
+
+      # Configure (no custom flags!)
       - name: Configure
         run: |
           if [ ! -f build/build.ninja ]; then
@@ -76,8 +83,7 @@ jobs:
               -DCMAKE_C_COMPILER=$CC \
               -DCMAKE_CXX_COMPILER=$CXX \
               -DCMAKE_OSX_SYSROOT=$SDKROOT \
-              -DCMAKE_EXE_LINKER_FLAGS="-liconv" \
-              -DUSE_INTERNAL_LIBICONV=OFF \
+              -DUSE_INTERNAL_LIBICONV=ON \
               -DENABLE_JEMALLOC=OFF \
               -DENABLE_TESTS=OFF \
               -DENABLE_UTILS=OFF \
