@@ -11,38 +11,40 @@ jobs:
     runs-on: macos-latest
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
       - name: Install dependencies
         run: |
           brew update
-          brew install cmake ninja ccache llvm findutils grep zip
+          brew install cmake ninja ccache llvm findutils grep zip libiconv
 
-      # GNU tools (replace BSD tools)
       - name: Setup GNU tools
         run: |
           echo "$(brew --prefix findutils)/libexec/gnubin" >> $GITHUB_PATH
           echo "$(brew --prefix grep)/libexec/gnubin" >> $GITHUB_PATH
 
-      # LLVM toolchain (required)
       - name: Setup LLVM
         run: |
           LLVM_ROOT=$(brew --prefix llvm)
           echo "$LLVM_ROOT/bin" >> $GITHUB_PATH
-
           echo "CC=$LLVM_ROOT/bin/clang" >> $GITHUB_ENV
           echo "CXX=$LLVM_ROOT/bin/clang++" >> $GITHUB_ENV
           echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache" >> $GITHUB_ENV
 
-      # macOS SDK fix
       - name: Setup SDK
         run: |
           echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> $GITHUB_ENV
 
-      # ✅ Incremental builds (ccache)
+      # ✅ FIX: Proper libiconv integration
+      - name: Setup libiconv
+        run: |
+          ICONV_PREFIX=$(brew --prefix libiconv)
+          echo "CMAKE_PREFIX_PATH=$ICONV_PREFIX:$CMAKE_PREFIX_PATH" >> $GITHUB_ENV
+          echo "LIBRARY_PATH=$ICONV_PREFIX/lib:$LIBRARY_PATH" >> $GITHUB_ENV
+          echo "CPATH=$ICONV_PREFIX/include:$CPATH" >> $GITHUB_ENV
+
       - name: Cache ccache
         uses: actions/cache@v4
         with:
@@ -54,27 +56,15 @@ jobs:
       - name: Setup ccache
         run: |
           export CCACHE_DIR=~/.ccache
-          export CCACHE_MAXSIZE=5G
           ccache -M 5G
           ccache -s
 
-      # ⚡ OPTIONAL: true incremental builds (use later)
-      # - name: Cache build directory
-      #   uses: actions/cache@v4
-      #   with:
-      #     path: build
-      #     key: macos-build-v1
-      #     restore-keys: |
-      #       macos-build-
-
-      # 🔥 IMPORTANT: clean env (ClickHouse requirement)
       - name: Clean environment
         run: |
           unset CFLAGS
           unset CXXFLAGS
           unset LDFLAGS
 
-      # Configure (no custom flags!)
       - name: Configure
         run: |
           if [ ! -f build/build.ninja ]; then
@@ -83,7 +73,6 @@ jobs:
               -DCMAKE_C_COMPILER=$CC \
               -DCMAKE_CXX_COMPILER=$CXX \
               -DCMAKE_OSX_SYSROOT=$SDKROOT \
-              -DUSE_INTERNAL_LIBICONV=ON \
               -DENABLE_JEMALLOC=OFF \
               -DENABLE_TESTS=OFF \
               -DENABLE_UTILS=OFF \
@@ -99,29 +88,18 @@ jobs:
               -DENABLE_RUST=OFF
           fi
 
-      - name: Build (incremental)
+      - name: Build
         run: |
           ninja -C build -j 4 clickhouse
-
-      - name: Show ccache stats
-        run: |
-          ccache -s
-
-      - name: Strip binary
-        run: |
-          strip build/programs/clickhouse || true
 
       - name: Package artifact
         run: |
           mkdir -p artifacts
-          cp build/programs/clickhouse artifacts/ || true
-          cp build/programs/clickhouse-client artifacts/ || true
-
+          cp build/programs/clickhouse artifacts/
           cd artifacts
           zip -r clickhouse-${GITHUB_SHA}.zip .
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: clickhouse-macos
           path: artifacts/*.zip
