@@ -19,12 +19,12 @@ jobs:
         with:
           submodules: recursive
 
-      # ✅ Stable dependency set (don’t trim this)
+      # ✅ Install correct toolchain + deps
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            clang lld \
+            clang-15 lld-15 \
             cmake ninja-build ccache \
             build-essential pkg-config \
             git \
@@ -35,7 +35,14 @@ jobs:
             libzstd-dev \
             liblz4-dev
 
-      # ✅ Cache only ccache (safe)
+      # ✅ Force correct compiler (CRITICAL FIX)
+      - name: Set compiler
+        run: |
+          echo "CC=clang-15" >> $GITHUB_ENV
+          echo "CXX=clang++-15" >> $GITHUB_ENV
+          echo "LD=ld.lld-15" >> $GITHUB_ENV
+
+      # ✅ ccache (safe speedup)
       - name: Cache ccache
         uses: actions/cache@v4
         with:
@@ -49,29 +56,31 @@ jobs:
           ccache -M 5G
           ccache -s
 
-      # ❗ Clean environment (ClickHouse requirement)
+      # ❗ Required by ClickHouse build system
       - name: Clean environment
         run: |
           unset CFLAGS
           unset CXXFLAGS
           unset LDFLAGS
 
-      # ❗ Always fresh build (avoid subtle corruption)
+      # ❗ Avoid stale/broken builds
       - name: Clean build directory
         run: rm -rf build
 
-      # ✅ Conservative config (don’t over-disable yet)
+      # ✅ Configure
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=clang \
-            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_COMPILER=$CC \
+            -DCMAKE_CXX_COMPILER=$CXX \
+            -DCMAKE_LINKER=$LD \
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
             -DENABLE_TESTS=OFF \
             -DENABLE_UTILS=OFF \
             -DENABLE_BENCHMARKS=OFF
 
+      # ✅ Build only main binary
       - name: Build
         run: |
           ninja -C build -j 4 clickhouse
@@ -83,6 +92,7 @@ jobs:
         run: |
           strip build/programs/clickhouse || true
 
+      # ✅ Package artifact
       - name: Package artifact
         run: |
           mkdir -p artifacts
@@ -90,6 +100,7 @@ jobs:
           cd artifacts
           zip -r clickhouse-linux-${GITHUB_SHA}.zip .
 
+      # ✅ Upload artifact
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
